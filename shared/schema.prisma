@@ -1,0 +1,361 @@
+// Stemacteren Workshop Planning System
+// Database Schema - Source of Truth
+// PRINCIPE: Alles is configureerbaar, niets hardcoded
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// CONFIGURATIE ENTITIES
+// Deze tabellen bevatten alle aanpasbare settings
+// ============================================
+
+model Location {
+  id              String   @id @default(uuid())
+  code            String   @unique // AMS, UTR, LEI - maar aanpasbaar
+  name            String
+  address         String
+  availableDays   String[] // ["tuesday", "wednesday", "thursday"]
+  calendarId      String?  // Google Calendar ID
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  workshops       Workshop[]
+  preferredBy     Person[]  @relation("PreferredLocation")
+  workshopTypes   WorkshopTypeLocation[]
+
+  @@map("locations")
+}
+
+model Person {
+  id                  String     @id @default(uuid())
+  name                String
+  email               String?
+  phone               String?
+  type                PersonType
+  maxDaysPerWeek      Int?       // null = onbeperkt
+  preferredLocationId String?
+  isActive            Boolean    @default(true)
+  notes               String?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  // Relations
+  preferredLocation   Location?    @relation("PreferredLocation", fields: [preferredLocationId], references: [id])
+  canTeach            PersonWorkshopType[]
+  assignments         Assignment[]
+  availability        Availability[]
+
+  @@map("persons")
+}
+
+enum PersonType {
+  INSTRUCTOR        // Interne docent
+  EXTERNAL_INSTRUCTOR // Externe/gastdocent
+  TECHNICIAN        // Technicus
+}
+
+model WorkshopType {
+  id                  String   @id @default(uuid())
+  code                String   @unique // BWS, BTC, VWS - maar aanpasbaar
+  name                String
+  description         String?
+
+  // Timing configuratie
+  durationType        DurationType
+  defaultStartTime    String?  // "19:30" format
+  defaultEndTime      String?  // "22:00" format
+  sessionCount        Int      @default(1) // Aantal sessies (bijv. 9 voor BWS)
+
+  // Deelnemers
+  maxParticipants     Int
+  minParticipants     Int
+
+  // Financieel
+  price               Decimal  @db.Decimal(10, 2)
+
+  // Vereisten
+  requiresTechnician  Boolean  @default(false)
+
+  // Zichtbaarheid
+  visiblePublic       Boolean  @default(true)  // Op publieke website
+  visibleStudents     Boolean  @default(true)  // Op cursisten portal
+
+  isActive            Boolean  @default(true)
+  sortOrder           Int      @default(0)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Relations
+  allowedLocations    WorkshopTypeLocation[]
+  allowedInstructors  PersonWorkshopType[]
+  workshops           Workshop[]
+  prerequisites       WorkshopTypePrerequisite[] @relation("RequiresPrerequisite")
+  prerequisiteFor     WorkshopTypePrerequisite[] @relation("IsPrerequisiteFor")
+
+  @@map("workshop_types")
+}
+
+enum DurationType {
+  EVENING_SERIES    // Reeks avonden (BWS)
+  MULTI_DAY         // Meerdere dagen (BTC, AWS)
+  SINGLE_DAY        // 1 dag
+  HALF_DAY          // Halve dag (IWS)
+  SINGLE_SESSION    // Losse sessie (stemtest)
+}
+
+// Many-to-many: WorkshopType <-> Location
+model WorkshopTypeLocation {
+  id              String       @id @default(uuid())
+  workshopTypeId  String
+  locationId      String
+
+  workshopType    WorkshopType @relation(fields: [workshopTypeId], references: [id], onDelete: Cascade)
+  location        Location     @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@unique([workshopTypeId, locationId])
+  @@map("workshop_type_locations")
+}
+
+// Many-to-many: Person <-> WorkshopType (wie mag wat geven)
+model PersonWorkshopType {
+  id              String       @id @default(uuid())
+  personId        String
+  workshopTypeId  String
+
+  person          Person       @relation(fields: [personId], references: [id], onDelete: Cascade)
+  workshopType    WorkshopType @relation(fields: [workshopTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([personId, workshopTypeId])
+  @@map("person_workshop_types")
+}
+
+// Self-referencing: WorkshopType prerequisites
+model WorkshopTypePrerequisite {
+  id                  String       @id @default(uuid())
+  workshopTypeId      String
+  prerequisiteTypeId  String
+  isRequired          Boolean      @default(false) // true = verplicht, false = aanbevolen
+
+  workshopType        WorkshopType @relation("RequiresPrerequisite", fields: [workshopTypeId], references: [id], onDelete: Cascade)
+  prerequisiteType    WorkshopType @relation("IsPrerequisiteFor", fields: [prerequisiteTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([workshopTypeId, prerequisiteTypeId])
+  @@map("workshop_type_prerequisites")
+}
+
+// ============================================
+// OPERATIONELE ENTITIES
+// Daadwerkelijke workshops en toewijzingen
+// ============================================
+
+model Workshop {
+  id                  String         @id @default(uuid())
+  displayId           Int            @default(autoincrement()) // Voor IWS_192_U format
+  typeId              String
+  locationId          String
+
+  // Timing
+  startDate           DateTime       @db.Date
+  endDate             DateTime?      @db.Date // null voor single-day
+
+  // Status
+  status              WorkshopStatus @default(DRAFT)
+  currentParticipants Int            @default(0)
+
+  // Calendar sync
+  calendarEventId     String?
+  syncUid             String?        // Voor backward compatibility met bestaande sync
+
+  notes               String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  // Relations
+  type                WorkshopType   @relation(fields: [typeId], references: [id])
+  location            Location       @relation(fields: [locationId], references: [id])
+  sessions            WorkshopSession[]
+  assignments         Assignment[]
+
+  @@map("workshops")
+}
+
+enum WorkshopStatus {
+  DRAFT       // Concept, nog niet gepubliceerd
+  PUBLISHED   // Gepubliceerd, open voor inschrijving
+  CONFIRMED   // Voldoende deelnemers, gaat door
+  CANCELLED   // Geannuleerd
+  COMPLETED   // Afgerond
+}
+
+model WorkshopSession {
+  id                  String    @id @default(uuid())
+  workshopId          String
+  sessionNumber       Int       // 1, 2, 3... voor volgorde
+
+  // Timing
+  date                DateTime  @db.Date
+  startTime           String    // "19:30" format
+  endTime             String    // "22:00" format
+
+  // Vereisten (kan per sessie verschillen)
+  requiresTechnician  Boolean   @default(false)
+
+  notes               String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  // Relations
+  workshop            Workshop  @relation(fields: [workshopId], references: [id], onDelete: Cascade)
+  assignments         Assignment[]
+
+  @@unique([workshopId, sessionNumber])
+  @@map("workshop_sessions")
+}
+
+model Assignment {
+  id          String           @id @default(uuid())
+  workshopId  String
+  sessionId   String?          // null = hele workshop, niet-null = specifieke sessie
+  personId    String
+  role        AssignmentRole
+  status      AssignmentStatus @default(PENDING)
+  confirmedAt DateTime?
+  notes       String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  // Relations
+  workshop    Workshop         @relation(fields: [workshopId], references: [id], onDelete: Cascade)
+  session     WorkshopSession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  person      Person           @relation(fields: [personId], references: [id])
+
+  @@map("assignments")
+}
+
+enum AssignmentRole {
+  INSTRUCTOR  // Hoofddocent
+  CO_INSTRUCTOR // Co-docent
+  GUEST       // Gastdocent
+  TECHNICIAN  // Technicus
+}
+
+enum AssignmentStatus {
+  PENDING     // Nog niet bevestigd
+  CONFIRMED   // Bevestigd
+  DECLINED    // Afgewezen
+}
+
+// ============================================
+// BESCHIKBAARHEID
+// ============================================
+
+model Availability {
+  id               String           @id @default(uuid())
+  personId         String
+  type             AvailabilityType
+
+  // Datum range
+  startDate        DateTime         @db.Date
+  endDate          DateTime         @db.Date
+
+  // Optioneel: recurring pattern (RRULE format)
+  recurringPattern String?
+
+  reason           String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  // Relations
+  person           Person           @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@map("availability")
+}
+
+enum AvailabilityType {
+  AVAILABLE     // Beschikbaar
+  UNAVAILABLE   // Niet beschikbaar (vakantie, etc.)
+  PREFERRED     // Voorkeur voor deze periode
+}
+
+// ============================================
+// CONFIGUREERBARE SETTINGS
+// Key-value store voor alle business rules
+// ============================================
+
+model Setting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     Json     // Flexibele JSON opslag
+  category  String   // Voor groepering in UI
+  label     String   // Menselijke beschrijving
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// ============================================
+// AI CHAT GESCHIEDENIS
+// ============================================
+
+model ChatSession {
+  id        String        @id @default(uuid())
+  userId    String?       // null voor anoniem
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  messages  ChatMessage[]
+
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id        String      @id @default(uuid())
+  sessionId String
+  role      MessageRole
+  content   String
+
+  // Voor function calls
+  functionCall  Json?
+  functionResult Json?
+
+  createdAt DateTime    @default(now())
+
+  // Relations
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("chat_messages")
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  FUNCTION
+}
+
+// ============================================
+// AUDIT LOG
+// Voor tracking van wijzigingen
+// ============================================
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  entityType String   // "Workshop", "Assignment", etc.
+  entityId   String
+  action     String   // "CREATE", "UPDATE", "DELETE"
+  changes    Json?    // Wat is er gewijzigd
+  userId     String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}

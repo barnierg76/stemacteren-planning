@@ -1,0 +1,34 @@
+# FastAPI & Server
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# Database
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+alembic==1.13.1
+
+# Validation & Settings
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# AI & Optimization
+anthropic==0.18.1
+ortools==9.8.3296
+
+# External Services
+twilio==8.13.0
+google-api-python-client==2.118.0
+google-auth-oauthlib==1.2.0
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2024.1
+pyyaml==6.0.1
+httpx==0.26.0
+
+# Development
+pytest==8.0.0
+pytest-asyncio==0.23.4
+black==24.1.1
+ruff==0.1.14
